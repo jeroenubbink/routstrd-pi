@@ -44,7 +44,7 @@ sessions) against your pi session.
 
 ### Gentle Shell
 
-If you use [gentle-pi](https://github.com/earendil-works/gentle-pi), its
+If you use gentle-pi (Gentle Shell), its
 footer extension replaces pi's (and ours), so the package automatically
 switches to status mode: `⚡13.99sats used @ai.redsh1ft.com · ₿1519 wallet ·
 72sats remote` appears in gentle's status surfaces (the INTEGRATIONS card /
@@ -64,8 +64,8 @@ Prerequisites: a running [routstrd](https://github.com/routstr/routstrd) daemon
 with pi wired up (`routstrd clients add --pi-agent`), and pi itself.
 
 ```sh
-pi install ./pi-agent-routstrd     # local path, or:
-pi install git:github.com/routstr/routstrd-pi@v0.1.0
+pi install git:github.com/jeroenubbink/routstrd-pi      # from git, or:
+pi install npm:routstrd-pi                               # once published to npm
 ```
 
 Then start pi normally — the footer appears once the first events fire.
@@ -138,6 +138,59 @@ The daemon base URL is otherwise resolved in this order:
 - [x] Local wallet balance in sats (₿)
 - [x] Remote provider deposits — API-key credits (`Nsats remote`)
 - [ ] Per-mint / per-node breakdown
+
+## For agents: how to configure this for a user
+
+If you are an agent asked to set this package up, this is the whole picture.
+
+**What it is.** A display-only pi extension: it swaps pi's dollar-priced
+footer/status figures for routstrd's real numbers — session spend in sats,
+the routstr node in use, the local Cashu wallet balance, and remote API-key
+credits. It never spends, moves, or mutates funds; it only makes `GET`
+requests to the local routstrd daemon.
+
+**Prerequisites.** A running [routstrd](https://github.com/routstr/routstrd)
+daemon (default `http://127.0.0.1:8008`) and pi wired to it
+(`routstrd clients add --pi-agent`). If `curl http://127.0.0.1:8008/health`
+answers `{"ok":true}` the daemon is up.
+
+**How it computes session spend.** Each assistant message routed through the
+daemon carries the daemon's response id in `message.responseId`. The extension
+collects those ids, looks up each in `GET /usage`, and sums the per-request
+`satsCost`. That makes the ⚡ figure exact for this pi session (other clients,
+other pi sessions, failed requests are not counted) and stable across
+`/resume`, `/fork` and compaction. Balances come from `GET /balance` (local
+Cashu wallet) and `GET /keys/balance` (credit held on remote providers).
+
+**To install for the user:**
+
+```sh
+pi install git:github.com/jeroenubbink/routstrd-pi
+```
+
+Then restart pi. Under Gentle Shell the figures appear in the status surfaces;
+on vanilla pi the footer itself is replaced. Nothing else to enable.
+
+**To configure:** create or edit `~/.routstrd/pi.json` (honoring
+`ROUTSTRD_DIR`; `ROUTSTRD_PI_CONFIG` overrides the path) exactly as documented
+in [Configuration](#configuration) above. All keys are optional; an invalid or
+missing file means the defaults. Restart pi (or `/reload`) after edits.
+Useful presets:
+
+```json
+{"show":{"remote":false}}
+```
+— minimal line (sats + node + wallet only).
+
+```json
+{"show":{"usd":true,"node":true,"remote":true}}
+```
+— everything, forced on even when narrow.
+
+**Diagnostics.** `⚡--`/`₿--` (footer) or `⚡ offline` (status) mean the daemon
+is unreachable — check `routstrd status`. A trailing `…` marks a response
+whose usage row has not synced yet. Set `ROUTSTRD_PI_DEBUG=1` to append a
+trace (lookups, matches, refreshes) to `/tmp/routstrd-pi-debug.log`.
 
 ## License
 
