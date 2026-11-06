@@ -1,0 +1,18 @@
+{
+  "name": "routstrd-pi",
+  "version": "0.1.0",
+  "description": "Pi agent footer that shows routstrd session spend and wallet balance in sats (₿/⚡) instead of dollars.",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/routstr/routstrd-pi"
+  },
+  "pi": {
+    "extensions": ["./extensions/routstrd-sats.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
