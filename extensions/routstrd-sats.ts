@@ -2,8 +2,10 @@
  * routstrd-pi — sats display for the pi coding agent.
  *
  * Shows routstrd's real, wallet-signed numbers instead of pi's dollar
- * estimates: what this session spent in satoshis (⚡) and what is left in
- * the local Cashu wallet (₿).
+ * estimates: what this session spent in satoshis (⚡), which routstr node
+ * served the latest response (@host), what is left in the local Cashu
+ * wallet (₿), and what is held as API-key credit on remote providers
+ * ("Nsats remote").
  *
  * Two display modes, negotiated automatically:
  *
@@ -30,11 +32,15 @@
  * `GET /balance` (local Cashu proofs only; remote provider deposits are a
  * future addition).
  *
- * Requirements
- * ------------
- * A running routstrd daemon. The base URL is resolved from
- * `ROUTSTRD_BASE_URL`, then `~/.routstrd/config.json` (honoring
- * `ROUTSTRD_DIR`), and defaults to http://127.0.0.1:8008.
+ * Configuration
+ * -------------
+ * Optional `~/.routstrd/pi.json` (honoring `ROUTSTRD_DIR`, or
+ * `ROUTSTRD_PI_CONFIG`) with `show.spend|usd|node|wallet|remote`, each
+ * `true` (always), `false` (never) or `"auto"` (only while it fits the
+ * terminal); plus an optional `daemonUrl`. Defaults: spend/wallet always,
+ * node/remote auto, usd off. Requires a running routstrd daemon; the base
+ * URL resolves from `ROUTSTRD_BASE_URL`, the config's `daemonUrl`, then
+ * `~/.routstrd/config.json`, then http://127.0.0.1:8008.
  */
 
 import { appendFileSync, readFileSync } from "node:fs";
@@ -147,6 +153,9 @@ interface UsageRow {
   requestId?: string;
   upstreamResponseId?: string | null;
   satsCost?: number;
+  baseUrl?: string;
+  totalUsd?: number;
+  cost?: number;
 }
 
 const DEFAULT_PORT = 8008;
@@ -154,10 +163,12 @@ const STATUS_KEY = "routstrd";
 
 /** Resolve the daemon root URL without a trailing /v1 or slash. */
 function resolveDaemonBaseUrl(): string {
+  const strip = (url: string): string => url.replace(/\/+$/, "").replace(/\/v1$/, "");
   const fromEnv = process.env.ROUTSTRD_BASE_URL;
   if (fromEnv && fromEnv.trim()) {
-    return fromEnv.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
+    return strip(fromEnv.trim());
   }
+  if (rules.daemonUrl) return strip(rules.daemonUrl);
   try {
     const dir = process.env.ROUTSTRD_DIR || path.join(homedir(), ".routstrd");
     const cfg = JSON.parse(readFileSync(path.join(dir, "config.json"), "utf-8"));
@@ -206,6 +217,30 @@ class RoutstrDaemon {
     }
     return sawNumber ? sum : null;
   }
+
+  /** Total sats held as API-key credit on remote routstr providers.
+   * Slower than the local endpoints: the daemon asks remote nodes live. */
+  async remoteKeysSats(timeoutMs = 10_000): Promise<number | null> {
+    const data = await this.get<{ output?: { keys?: Array<{ id?: string; balance?: unknown }> } }>(
+      "/keys/balance",
+      timeoutMs,
+    );
+    const keys = Array.isArray(data?.output?.keys) ? data.output.keys : [];
+    let sum = 0;
+    let sawNumber = false;
+    for (const key of keys) {
+      if (
+        typeof key?.id === "string" &&
+        key.id.startsWith("apikey:") &&
+        typeof key.balance === "number" &&
+        Number.isFinite(key.balance)
+      ) {
+        sum += key.balance;
+        sawNumber = true;
+      }
+    }
+    return sawNumber ? sum : null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +270,11 @@ function formatSats(sats: number): string {
   if (sats < 100) return sats.toFixed(2);
   if (sats < 1000) return sats.toFixed(1);
   return Math.round(sats).toLocaleString("en-US");
+}
+
+function formatUsd(usd: number): string {
+  const decimals = usd >= 1 ? 2 : usd >= 0.001 ? 3 : 4;
+  return `$${usd.toFixed(decimals)}`;
 }
 
 function sanitizeStatusText(text: string): string {
@@ -335,6 +375,75 @@ function scanSession(ctx: PiExtensionContext): ScanResult | null {
 }
 
 // ---------------------------------------------------------------------------
+// Display configuration
+//
+// All optional, in a small JSON file (default ~/.routstrd/pi.json, honoring
+// ROUTSTRD_DIR; ROUTSTRD_PI_CONFIG points elsewhere). Each display rule is
+// `true` (always show), `false` (never show) or `"auto"` (show only while
+// it fits the terminal). Defaults give the recommended layout; restart pi
+// (or /reload) to apply changes.
+// ---------------------------------------------------------------------------
+
+/** `true` = always show, `false` = never, `"auto"` = only when it fits. */
+type ShowRule = boolean | "auto";
+
+interface DisplayRules {
+  daemonUrl?: string;
+  show: {
+    spend: ShowRule;
+    usd: ShowRule;
+    node: ShowRule;
+    wallet: ShowRule;
+    remote: ShowRule;
+  };
+}
+
+const DEFAULT_SHOW: DisplayRules["show"] = {
+  spend: true,
+  usd: false,
+  node: "auto",
+  wallet: true,
+  remote: "auto",
+};
+
+function displayConfigPath(): string {
+  const override = process.env.ROUTSTRD_PI_CONFIG;
+  if (override && override.trim()) return override.trim();
+  const dir = process.env.ROUTSTRD_DIR || path.join(homedir(), ".routstrd");
+  return path.join(dir, "pi.json");
+}
+
+function normalizeShowRule(value: unknown, fallback: ShowRule): ShowRule {
+  if (value === true || value === false || value === "auto") return value;
+  return fallback;
+}
+
+function loadDisplayRules(): DisplayRules {
+  const fallback: DisplayRules = { show: { ...DEFAULT_SHOW } };
+  try {
+    const raw = JSON.parse(readFileSync(displayConfigPath(), "utf-8")) as Record<string, unknown>;
+    const show = (raw && typeof raw.show === "object" && raw.show) || {};
+    return {
+      daemonUrl:
+        typeof raw.daemonUrl === "string" && raw.daemonUrl.trim()
+          ? raw.daemonUrl.trim()
+          : undefined,
+      show: {
+        spend: normalizeShowRule(show.spend, fallback.show.spend),
+        usd: normalizeShowRule(show.usd, fallback.show.usd),
+        node: normalizeShowRule(show.node, fallback.show.node),
+        wallet: normalizeShowRule(show.wallet, fallback.show.wallet),
+        remote: normalizeShowRule(show.remote, fallback.show.remote),
+      },
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+const rules = loadDisplayRules();
+
+// ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
 
@@ -342,13 +451,19 @@ const daemon = new RoutstrDaemon(resolveDaemonBaseUrl());
 
 /** gen-id → sats charged, for every response we resolved from /usage. */
 const satsByGenId = new Map<string, number>();
+/** gen-id → host of the routstr node that served the response. */
+const nodeByGenId = new Map<string, string>();
+/** gen-id → USD cost reported for the response (informational only). */
+const usdByGenId = new Map<string, number>();
 /** gen-ids seen in this session that /usage does not know (yet). */
 const pendingGenIds = new Set<string>();
 /** gen-ids we gave up looking for (avoid endless retries). */
 const unresolvedGenIds = new Set<string>();
 
 let walletSats: number | null = null;
+let remoteSats: number | null = null;
 let daemonReachable: boolean | null = null;
+let remoteInFlight = false;
 let tuiRef: PiTui | null = null;
 let themeRef: PiTheme | null = null;
 let footerDataRef: PiFooterData | null = null;
@@ -377,6 +492,8 @@ function clearTimers(): void {
     clearInterval(walletTimer);
     walletTimer = null;
   }
+  const slot = (globalThis as Record<symbol, { removeResizeListener?: () => void } | undefined>)[TIMER_SLOT];
+  slot?.removeResizeListener?.();
 }
 
 function startTimers(): void {
@@ -384,7 +501,25 @@ function startTimers(): void {
   slot?.clearTimers?.();
   (globalThis as Record<symbol, unknown>)[TIMER_SLOT] = { clearTimers };
   if (walletTimer === null) {
-    walletTimer = setInterval(refreshFromDaemon, 60_000);
+    walletTimer = setInterval(() => {
+      refreshFromDaemon();
+      refreshRemote();
+    }, 60_000);
+  }
+  // Status mode has no render callback, so re-fit the status line when the
+  // terminal is resized (footer mode gets the new width on its next render).
+  const stdout = typeof process === "object" ? (process.stdout as unknown) : undefined;
+  if (stdout && typeof (stdout as { on?: unknown }).on === "function") {
+    const handler = (): void => {
+      if (!footerActive) updateStatus();
+    };
+    (stdout as { on: (ev: string, fn: () => void) => void }).on("resize", handler);
+    (globalThis as Record<symbol, unknown>)[TIMER_SLOT] = {
+      clearTimers,
+      removeResizeListener: () => {
+        (stdout as { off?: (ev: string, fn: () => void) => void }).off?.("resize", handler);
+      },
+    };
   }
 }
 
@@ -405,17 +540,58 @@ function ensureScan(ctx: PiExtensionContext): ScanResult | null {
   return current;
 }
 
-function sessionSatsOf(scan: ScanResult): { sats: number; matched: number } {
+function sessionSatsOf(scan: ScanResult): { sats: number; matched: number; usd: number } {
   let sats = 0;
   let matched = 0;
+  let usd = 0;
   for (const id of scan.genIds) {
     const value = satsByGenId.get(id);
     if (value !== undefined) {
       sats += value;
       matched += 1;
+      usd += usdByGenId.get(id) ?? 0;
     }
   }
-  return { sats, matched };
+  return { sats, matched, usd };
+}
+
+/** Hostname of the node that served the most recent matched response. */
+function currentNodeOf(scan: ScanResult): string | null {
+  for (let i = scan.genIds.length - 1; i >= 0; i -= 1) {
+    const node = nodeByGenId.get(scan.genIds[i]);
+    if (node) return node;
+  }
+  return null;
+}
+
+function nodeHostOf(baseUrl: unknown): string | null {
+  if (typeof baseUrl !== "string" || !baseUrl) return null;
+  try {
+    return new URL(baseUrl).hostname || null;
+  } catch {
+    return baseUrl.replace(/^[a-z]+:\/\//, "").replace(/\/.*/, "") || null;
+  }
+}
+
+/** Refresh the remote API-key credits independently: the endpoint asks
+ * remote nodes live and is slower than the local endpoints, so it must
+ * never delay sats attribution. */
+async function refreshRemote(): Promise<void> {
+  if (remoteInFlight) return;
+  remoteInFlight = true;
+  try {
+    const remote = await daemon.remoteKeysSats();
+    if (remote !== null && remote !== remoteSats) {
+      remoteSats = remote;
+      if (footerActive) tuiRef?.requestRender?.();
+      else updateStatus();
+    }
+  } catch {
+    // Older daemons lack /keys/balance, or a remote node is slow: keep the
+    // last known figure; nothing to say on the very first failure.
+  } finally {
+    remoteInFlight = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -429,22 +605,56 @@ function updateStatus(): void {
   if (typeof setStatus !== "function") return;
   const scan = ensureScan(ctxRef);
   if (scan) queueLookups(scan);
-  const parts: string[] = [];
 
-  if (scan && scan.genIds.length > 0) {
-    if (daemonReachable === false) {
-      parts.push("⚡ offline");
-    } else {
-      const { sats } = sessionSatsOf(scan);
-      const syncing = pendingGenIds.size > 0 ? "…" : "";
-      parts.push(`⚡${formatSats(sats)}sats used${syncing}`);
+  // Candidate parts in display order. `true` forces a part on, `false`
+  // removes it, and `"auto"` includes it only while the whole line fits the
+  // terminal, so a narrow window never shows a figure half-written. (Footer
+  // mode applies the same rule with the exact render width.)
+  const budget = statusBudget();
+  const chosen: string[] = [];
+  const add = (part: string | undefined, rule: ShowRule): void => {
+    if (!part || rule === false) return;
+    if (rule === "auto") {
+      const candidate = chosen.length === 0 ? part : `${chosen.join(" · ")} · ${part}`;
+      if (candidate.length > budget) return;
     }
+    chosen.push(part);
+  };
+
+  const routed = !!scan && scan.genIds.length > 0;
+  if (routed) {
+    const s = scan as ScanResult;
+    const { sats, usd } = sessionSatsOf(s);
+    if (rules.show.spend !== false) {
+      const text =
+        daemonReachable === false
+          ? "⚡ offline"
+          : `⚡${formatSats(sats)}sats used${pendingGenIds.size > 0 ? "…" : ""}`;
+      add(text, rules.show.spend);
+    }
+    if (usd > 0 && rules.show.usd !== false) add(formatUsd(usd), rules.show.usd);
+    const host = currentNodeOf(s);
+    if (host) add(`@${host}`, rules.show.node);
   }
-  if (walletSats !== null) {
-    parts.push(`₿${walletSats} wallet`);
+  if (walletSats !== null && rules.show.wallet !== false) {
+    add(`₿${walletSats} wallet`, rules.show.wallet);
+  }
+  if (remoteSats !== null && rules.show.remote !== false) {
+    add(`${remoteSats}sats remote`, rules.show.remote);
   }
 
-  setStatus(STATUS_KEY, parts.length > 0 ? parts.join(" · ") : undefined);
+  setStatus(STATUS_KEY, chosen.length > 0 ? chosen.join(" · ") : undefined);
+}
+
+/** Width budget for the status line: the terminal width minus generous room
+ * for the surrounding footer content owned by whoever renders the status. */
+function statusBudget(): number {
+  const columns =
+    typeof process === "object" && process.stdout && typeof process.stdout.columns === "number"
+      ? process.stdout.columns
+      : 0;
+  const width = columns > 0 ? columns : 80;
+  return Math.max(36, width - 70);
 }
 
 // ---------------------------------------------------------------------------
@@ -470,20 +680,29 @@ async function refreshFromDaemon(): Promise<void> {
     daemonReachable = true;
     dbg(`refresh fetched: rows=${rows.length} pending=${pendingGenIds.size} wallet=${wallet}`);
 
-    const byKey = new Map<string, number>();
+    const byKey = new Map<string, UsageRow>();
     for (const row of rows) {
       const key = row.upstreamResponseId ?? row.requestId;
       if (typeof key === "string" && typeof row.satsCost === "number") {
-        byKey.set(key, row.satsCost);
+        byKey.set(key, row);
       }
     }
 
     let changed = false;
     for (const id of pendingGenIds) {
-      const sats = byKey.get(id);
-      dbg(`  match ${id}: ${sats === undefined ? "MISS" : sats}`);
-      if (sats !== undefined) {
-        satsByGenId.set(id, sats);
+      const row = byKey.get(id);
+      dbg(`  match ${id}: ${row === undefined ? "MISS" : row.satsCost}`);
+      if (row !== undefined) {
+        satsByGenId.set(id, row.satsCost as number);
+        const host = nodeHostOf(row.baseUrl);
+        if (host) nodeByGenId.set(id, host);
+        const usd =
+          typeof row.totalUsd === "number"
+            ? row.totalUsd
+            : typeof row.cost === "number"
+              ? row.cost
+              : undefined;
+        if (usd !== undefined) usdByGenId.set(id, usd);
         pendingGenIds.delete(id);
         changed = true;
       }
@@ -575,39 +794,77 @@ function buildFooterComponent(): PiComponent {
       if (!scan || !sessionManager) return [""];
       queueLookups(scan);
 
-      const { sats: sessionSats, matched } = sessionSatsOf(scan);
+      const { sats: sessionSats, matched, usd: sessionUsd } = sessionSatsOf(scan);
       const allResolved = matched === scan.genIds.length;
 
-      // --- token stats (same sources as the built-in footer) ---
-      const totals = scan.totals;
-      const statsParts: string[] = [];
-      if (totals.input) statsParts.push(theme.fg("dim", `↑${formatTokens(totals.input)}`));
-      if (totals.output) statsParts.push(theme.fg("dim", `↓${formatTokens(totals.output)}`));
-      if (totals.cacheRead) statsParts.push(theme.fg("dim", `R${formatTokens(totals.cacheRead)}`));
-      if (totals.cacheWrite) statsParts.push(theme.fg("dim", `W${formatTokens(totals.cacheWrite)}`));
-      if ((totals.cacheRead > 0 || totals.cacheWrite > 0) && scan.cacheHitRate !== undefined) {
-        statsParts.push(theme.fg("dim", `CH${scan.cacheHitRate.toFixed(1)}%`));
+      // --- right side: model name, thinking level (computed early for fitting) ---
+      const modelName = ctx.model?.id || "no-model";
+      let rightSideWithoutProvider = modelName;
+      if (ctx.model?.reasoning) {
+        const level = ctx.thinkingLevel || "off";
+        rightSideWithoutProvider =
+          level === "off" ? `${modelName} • thinking off` : `${modelName} • ${level}`;
       }
 
-      // --- money figure: routstrd sats when daemon-routed, else pi's $ estimate ---
+      // --- token stats (same sources as the built-in footer) ---
+      // statParts carry a dropRank: when the line does not fit, "auto"
+      // parts drop in rank order (usd first, then remote, then node).
+      const totals = scan.totals;
+      const statsParts: Array<{ text: string; dropRank?: number }> = [];
+      if (totals.input) statsParts.push({ text: theme.fg("dim", `↑${formatTokens(totals.input)}`) });
+      if (totals.output) statsParts.push({ text: theme.fg("dim", `↓${formatTokens(totals.output)}`) });
+      if (totals.cacheRead) statsParts.push({ text: theme.fg("dim", `R${formatTokens(totals.cacheRead)}`) });
+      if (totals.cacheWrite) statsParts.push({ text: theme.fg("dim", `W${formatTokens(totals.cacheWrite)}`) });
+      if ((totals.cacheRead > 0 || totals.cacheWrite > 0) && scan.cacheHitRate !== undefined) {
+        statsParts.push({ text: theme.fg("dim", `CH${scan.cacheHitRate.toFixed(1)}%`) });
+      }
+
+      // --- money: routstrd sats when daemon-routed, else pi's $ estimate ---
       if (scan.genIds.length > 0) {
-        if (daemonReachable === false) {
-          statsParts.push(theme.fg("error", "⚡--"));
-        } else {
-          const syncing = !allResolved ? "…" : "";
-          statsParts.push(theme.fg("accent", `⚡${formatSats(sessionSats)}sats${syncing}`));
+        if (rules.show.spend !== false) {
+          if (daemonReachable === false) {
+            statsParts.push({ text: theme.fg("error", "⚡--") });
+          } else {
+            const syncing = !allResolved ? "…" : "";
+            statsParts.push({
+              text: theme.fg("accent", `⚡${formatSats(sessionSats)}sats${syncing}`),
+            });
+          }
+        }
+        if (sessionUsd > 0 && rules.show.usd !== false) {
+          statsParts.push({
+            text: theme.fg("dim", formatUsd(sessionUsd)),
+            dropRank: rules.show.usd === "auto" ? 1 : undefined,
+          });
+        }
+        const node = currentNodeOf(scan);
+        if (node && rules.show.node !== false) {
+          statsParts.push({
+            text: theme.fg("dim", `@${node}`),
+            dropRank: rules.show.node === "auto" ? 3 : undefined,
+          });
         }
       } else if (totals.cost > 0) {
         // Not routed through routstrd: keep pi's own dollar estimate visible.
-        statsParts.push(theme.fg("dim", `$${totals.cost.toFixed(3)}`));
+        statsParts.push({ text: theme.fg("dim", `$${totals.cost.toFixed(3)}`) });
       }
 
       // --- ₿ local wallet balance ---
-      if (walletSats !== null) {
-        statsParts.push(theme.fg("success", `₿${walletSats}`));
-      } else if (daemonReachable === false && scan.genIds.length > 0) {
-        // This session is routstrd-routed, so a missing balance is a daemon problem.
-        statsParts.push(theme.fg("error", "₿--"));
+      if (rules.show.wallet !== false) {
+        if (walletSats !== null) {
+          statsParts.push({ text: theme.fg("success", `₿${walletSats}`) });
+        } else if (daemonReachable === false && scan.genIds.length > 0) {
+          // This session is routstrd-routed, so a missing balance is a daemon problem.
+          statsParts.push({ text: theme.fg("error", "₿--") });
+        }
+      }
+
+      // --- API-key credit on remote routstr providers ---
+      if (remoteSats !== null && rules.show.remote !== false) {
+        statsParts.push({
+          text: theme.fg("success", `${remoteSats}sats remote`),
+          dropRank: rules.show.remote === "auto" ? 2 : undefined,
+        });
       }
 
       // --- context usage ---
@@ -627,18 +884,26 @@ function buildFooterComponent(): PiComponent {
       } else {
         contextPart = theme.fg("dim", contextDisplay);
       }
-      statsParts.push(contextPart);
+      statsParts.push({ text: contextPart });
 
-      let statsLeft = statsParts.join(" ");
-
-      // --- right side: model name, thinking level, provider ---
-      const modelName = ctx.model?.id || "no-model";
-      let rightSideWithoutProvider = modelName;
-      if (ctx.model?.reasoning) {
-        const level = ctx.thinkingLevel || "off";
-        rightSideWithoutProvider =
-          level === "off" ? `${modelName} • thinking off` : `${modelName} • ${level}`;
+      // --- drop "auto" extras (usd, then remote, then node) while the line
+      // does not fit the terminal; the model truncation below is the last
+      // resort and mirrors the built-in footer. ---
+      const partsWidth = (parts: typeof statsParts): number =>
+        parts.reduce((w, p) => w + visibleWidth(p.text) + 1, -1);
+      const fitsWith = (parts: typeof statsParts): boolean =>
+        partsWidth(parts) + 2 + visibleWidth(rightSideWithoutProvider) <= width;
+      let working = statsParts;
+      if (!fitsWith(working)) {
+        for (const rank of [1, 2, 3]) {
+          if (fitsWith(working)) break;
+          const filtered = working.filter((p) => p.dropRank !== rank);
+          if (filtered.length !== working.length) working = filtered;
+        }
       }
+      let statsLeft = working.map((p) => p.text).join(" ");
+
+      // --- right side: provider prefix when there is room ---
       let rightSide = rightSideWithoutProvider;
       const providerCount = footerData?.getAvailableProviderCount?.() ?? 1;
       const statsLeftWidth = visibleWidth(statsLeft);
@@ -742,6 +1007,7 @@ export default function routstrdSatsFooter(pi: PiExtensionApi): void {
     const scan = ensureScan(ctx);
     if (scan) queueLookups(scan);
     scheduleRefresh();
+    refreshRemote();
   });
   pi.on("agent_start", (_event, ctx) => {
     latch(ctx);

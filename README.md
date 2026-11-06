@@ -11,16 +11,27 @@ figures for routstrd's real, wallet-signed numbers:
 - **`⚡13.99sats`** — what this session actually spent, summed from the routstrd
   daemon's per-request `satsCost`. A trailing `…` marks requests still syncing;
   `⚡--` marks an unreachable daemon.
+- **`@ai.redsh1ft.com`** — the routstr node that served the most recent
+  response, from the daemon's usage rows.
 - **`₿1519`** — total left in your local routstrd Cashu wallet, across mints.
+- **`72sats remote`** — total held as API-key credit on remote routstr
+  providers (daemon `GET /keys/balance`).
 - Everything else stays as you know it: `↑ ↓ R W` token stats, `CH` cache-hit
   rate, context `%`/window with the usual color thresholds, git branch, session
   name, model name with thinking level, and other extensions' status lines.
 
+Every figure can be turned on/off or made width-aware — see
+[Configuration](#configuration) below.
+
 Example footer (stats line):
 
 ```
-↑32.0k ↓254 R512 W0 CH1.6% ⚡13.99sats… ₿1519 24.0%/1M   (routstr) glm-5.3 • medium
+↑32.0k ↓254 R512 W0 CH1.6% ⚡13.99sats @ai.redsh1ft.com ₿1519 72sats remote 24.0%/1M   (routstr) glm-5.3 • medium
 ```
+
+The package is fully standalone — no other package is required. On a vanilla
+pi install it replaces the footer itself; nothing depends on Gentle Shell
+(see below for what happens when Gentle Shell is present).
 
 The session spend is exact: every assistant message routed through a routstr
 daemon carries the daemon's response id (visible as `responseId` in the session
@@ -35,10 +46,12 @@ sessions) against your pi session.
 
 If you use [gentle-pi](https://github.com/earendil-works/gentle-pi), its
 footer extension replaces pi's (and ours), so the package automatically
-switches to status mode: `⚡13.99sats used · ₿1519 wallet` appears in gentle's
-status surfaces (the INTEGRATIONS card / status bar), alongside gentle's own
-`ctx`/`$` segments. Those segments come from gentle-pi; hide them via
-gentle's visibility settings if you want the sats figures to stand alone.
+switches to status mode: `⚡13.99sats used @ai.redsh1ft.com · ₿1519 wallet ·
+72sats remote` appears in gentle's status surfaces (the INTEGRATIONS card /
+status bar), alongside gentle's own `ctx`/`$` segments. Those segments come
+from gentle-pi; hide them via gentle's visibility settings if you want the
+sats figures to stand alone. Without gentle-pi (or any other footer
+extension), the package renders its own footer — this is the default path.
 
 ### Debugging
 
@@ -59,11 +72,48 @@ Then start pi normally — the footer appears once the first events fire.
 
 ### Configuration
 
-The daemon base URL is resolved in this order:
+All display options are optional and live in a small JSON file. Default
+location: `~/.routstrd/pi.json` (honoring `ROUTSTRD_DIR`); `ROUTSTRD_PI_CONFIG`
+points at another path. The file is read when pi starts — restart pi (or run
+`/reload`) to apply changes. A missing or invalid file simply means defaults.
+
+```json
+{
+  "daemonUrl": "http://127.0.0.1:8008",
+  "show": {
+    "spend": true,
+    "usd": false,
+    "node": "auto",
+    "wallet": true,
+    "remote": "auto"
+  }
+}
+```
+
+| Key | Default | Shows | Rules |
+|---|---|---|---|
+| `show.spend` | `true` | `⚡13.99sats` — sats this session spent | `true`/`false` |
+| `show.usd` | `false` | `$0.012` — USD equivalent of the session spend, from the daemon's usage rows | `true`/`false`/`auto` |
+| `show.node` | `auto` | `@ai.redsh1ft.com` — routstr node that served the latest response | `true`/`false`/`auto` |
+| `show.wallet` | `true` | `₿1519` — local Cashu wallet balance | `true`/`false`/`auto` |
+| `show.remote` | `auto` | `72sats remote` — API-key credit on remote routstr providers | `true`/`false`/`auto` |
+| `daemonUrl` | — | Daemon base URL override | URL string |
+
+Rule semantics:
+
+- `true` — always show the figure (even when narrow).
+- `false` — never show it.
+- `"auto"` — show it only while it fits the terminal, so a narrow window
+  never shows a figure half-written. Extras drop in this order when space
+  runs out: `usd`, then `remote`, then `node`; the spend and wallet figures
+  come last. When the terminal is resized the line re-fits immediately.
+
+The daemon base URL is otherwise resolved in this order:
 
 1. `ROUTSTRD_BASE_URL` environment variable
-2. `host`/`port` from `~/.routstrd/config.json` (honoring `ROUTSTRD_DIR`)
-3. Default `http://127.0.0.1:8008`
+2. `daemonUrl` from the display config file
+3. `host`/`port` from `~/.routstrd/config.json` (honoring `ROUTSTRD_DIR`)
+4. Default `http://127.0.0.1:8008`
 
 ## Caveats
 
@@ -72,17 +122,22 @@ The daemon base URL is resolved in this order:
   are not counted — they still drain the wallet, so treat `₿` as the source
   of truth for what you have left.
 - `₿` shows the **local** Cashu wallet (proofs held at your mints) and can
-  dip briefly mid-payment while proofs are in flight. Deposits sitting as
-  API-key credit on remote routstr providers are not shown yet — planned for
-  a future release.
+  dip briefly mid-payment while proofs are in flight.
+- `Nsats remote` shows API-key credit on remote routstr providers (refreshed
+  on start and about once a minute; the daemon asks remote nodes live, so the
+  first figure can take a few seconds).
 - The extension is display-only; it never mutates wallet or daemon state.
+- Requires a routstrd daemon with `/keys/balance` for the remote figure
+  (0.3.0+); without it, the other figures still work.
+
 
 ## Roadmap
 
 - [x] Session spend in sats (⚡)
+- [x] Node that served the latest response (@host)
 - [x] Local wallet balance in sats (₿)
-- [ ] Remote provider deposits (API-key credits) from the provider registry
-- [ ] Per-mint breakdown
+- [x] Remote provider deposits — API-key credits (`Nsats remote`)
+- [ ] Per-mint / per-node breakdown
 
 ## License
 
