@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.1]
+
+- README screenshot of the live footer (real routstrd figures).
+- Published to npm as `routstrd-pi` for the pi.dev package gallery.
+
 ## [0.2.0]
 
 - Node indicator: `@host` — the routstr node that served the most recent

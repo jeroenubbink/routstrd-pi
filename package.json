@@ -1,6 +1,6 @@
 {
   "name": "routstrd-pi",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pi agent footer that shows routstrd session spend and wallet balance in sats (₿/⚡) instead of dollars.",
   "keywords": ["pi-package"],
   "license": "MIT",

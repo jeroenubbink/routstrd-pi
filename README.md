@@ -3,6 +3,8 @@
 A [pi](https://pi.dev) agent package that shows **routstrd** session spend and wallet
 balance in **satoshis** — with a ⚡ / ₿ glyph instead of pi's dollar estimate.
 
+![routstrd-pi footer: session spend in sats, current node, wallet and remote credits](docs/screenshot.png)
+
 ## What it does
 
 It replaces pi's built-in footer with a faithful copy that swaps the money
